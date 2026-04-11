@@ -126,7 +126,7 @@ Three apps in `INSTALLED_APPS`:
 - **`setup/seeds.py`** — User-provided seed profiles: parse URLs, create Leads + QUALIFIED Deals.
 - **`management/setup_crm.py`** — Idempotent CRM bootstrap (Site creation).
 - **`admin.py`** — Django Admin: SiteConfig, Campaign, LinkedInProfile, SearchKeyword, ActionLog, Task, ChatMessage.
-- **`django_settings.py`** — Django settings (SQLite at `data/db.sqlite3`). Apps: crm, chat, linkedin.
+- **`django_settings.py`** — Django settings. Database backend resolved from `DATABASE_URL` via `dj_database_url` (default: SQLite at `data/db.sqlite3`). Apps: crm, chat, linkedin.
 - **`premigrations/`** — Pre-Django filesystem migrations. Numbered `NNNN_*.py` files with `forward(root_dir)` functions. Runner in `__init__.py` discovers and applies unapplied migrations, tracked via `data/.premigrations` JSON file.
 
 ## Configuration

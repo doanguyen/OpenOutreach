@@ -5,6 +5,7 @@ Minimal Django settings for using DjangoCRM's ORM + admin.
 import os
 import sys
 from pathlib import Path
+import dj_database_url
 
 # Playwright's sync API runs inside an async event loop, which triggers
 # Django's async-safety check. We only use the ORM synchronously, so this is safe.
@@ -62,11 +63,13 @@ TEMPLATES = [
     },
 ]
 
+# Database configuration via DATABASE_URL (SQLite fallback for local dev)
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    f"sqlite:///{ROOT_DIR / 'data' / 'db.sqlite3'}"
+)
 DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": str(ROOT_DIR / "data" / "db.sqlite3"),
-    }
+    "default": dj_database_url.parse(DATABASE_URL, conn_max_age=600)
 }
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
