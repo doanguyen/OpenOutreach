@@ -1,5 +1,4 @@
 # linkedin/actions/message.py
-import json
 import logging
 from typing import Dict, Any
 
@@ -14,34 +13,6 @@ LINKEDIN_MESSAGING_URL = "https://www.linkedin.com/messaging/thread/new/"
 # LinkedIn A/B tests UI variants per account and renames classes often.
 # Each key maps to a list tried in order; first with a match wins.
 SELECTOR_CHAINS = {
-    # ── Profile page ──
-    "message_button": [
-        'button[aria-label*="Message"]:visible',
-        'button:has-text("Message"):visible',
-    ],
-    "overflow_action": [
-        'button[id$="profile-overflow-action"]:visible',
-        'button[aria-label="More actions"]:visible',
-        'main section button:has-text("More"):visible',
-    ],
-    "message_option": [
-        'div[role="menu"] a[href*="/messaging/"]:visible',
-        'div[role="menuitem"]:has-text("Message"):visible',
-        'div[aria-label$="to message"]:visible',
-        'li:has-text("Message"):visible',
-    ],
-    # ── Popup / thread compose ──
-    "message_input": [
-        'div[role="textbox"][aria-label*="Write a message"]:visible',
-        'div[role="textbox"][aria-label*="message"i]:visible',
-        'div[class*="msg-form__contenteditable"]:visible',
-        'div[contenteditable="true"]:visible',
-    ],
-    "send_button": [
-        'button[type="submit"][class*="msg-form"]:visible',
-        'form button[type="submit"]:visible',
-        'button[type="submit"]:visible',
-    ],
     # ── New thread: recipient search ──
     "connections_input": [
         'input[role="combobox"][placeholder*="name"]',
@@ -89,81 +60,12 @@ def _find(page, key: str, timeout: int = 5000) -> Locator:
     raise PlaywrightError(f"No selector matched for '{key}'. Tried: {tried}")
 
 
-def _open_compose_popup(session, page) -> bool:
-    """Open the messaging compose popup on the current profile page.
-
-    Tries the direct Message button first, then More → Message.
-    Returns True if the popup was opened.
-    """
-    try:
-        direct = _find(page, "message_button", timeout=3000)
-        direct.first.click()
-        logger.debug("Opened compose popup (direct button)")
-        return True
-    except PlaywrightError:
-        pass
-
-    try:
-        _find(page, "overflow_action").first.click()
-        session.wait()
-        _find(page, "message_option").first.click()
-        logger.debug("Opened compose popup (More → Message)")
-        return True
-    except PlaywrightError:
-        return False
-
-
-def _type_message(session, page, message: str):
-    """Type a message into the compose popup input area."""
-    input_area = _find(page, "message_input").first
-    try:
-        input_area.fill(message, timeout=10000)
-        logger.debug("Message typed cleanly")
-    except Exception:
-        logger.debug("fill() failed → using clipboard paste")
-        input_area.click()
-        page.evaluate(f"() => navigator.clipboard.writeText({json.dumps(message)})")
-        session.wait()
-        input_area.press("ControlOrMeta+V")
-        session.wait()
-
-
-def _click_send_and_verify(session, page) -> bool:
-    """Click the send button and verify the message was actually sent.
-
-    After clicking send, the input should clear. If text remains,
-    the send failed silently.
-    """
-    send_btn = _find(page, "send_button").first
-    send_btn.click(force=True)
-    session.wait(4, 5)
-
-    try:
-        remaining = _find(page, "message_input", timeout=2000).first
-        text = remaining.inner_text(timeout=2000).strip()
-        if text:
-            logger.error("Message input still has text after send → send failed")
-            return False
-    except (PlaywrightError, TimeoutError):
-        pass  # input gone → popup closed → success
-
-    return True
-
-
 # ── Public entry point ────────────────────────────────────────────
 
 
 def send_raw_message(session, profile: Dict[str, Any], message: str) -> bool:
     """Send an arbitrary message to a profile. Returns True if sent."""
-    from linkedin.actions.search import _go_to_profile
-    from linkedin.url_utils import public_id_to_url
-
     public_identifier = profile.get("public_identifier")
-    _go_to_profile(session, public_id_to_url(public_identifier), public_identifier)
-
-    if _send_msg_pop_up(session, profile, message):
-        return True
-    dump_page_html(session, profile, category="message_popup")
 
     if _send_message(session, profile, message):
         return True
@@ -176,78 +78,38 @@ def send_raw_message(session, profile: Dict[str, Any], message: str) -> bool:
     return False
 
 
-# ── Send strategies ───────────────────────────────────────────────
-
-
-def _send_msg_pop_up(session, profile: Dict[str, Any], message: str) -> bool:
-    """Open compose popup on the profile page, type, send, verify."""
-    session.wait()
-    page = session.page
-    public_identifier = profile.get("public_identifier")
-
-    try:
-        if not _open_compose_popup(session, page):
-            return False
-
-        session.wait()
-        _type_message(session, page, message)
-
-        if not _click_send_and_verify(session, page):
-            page.keyboard.press("Escape")
-            session.wait()
-            return False
-
-        page.keyboard.press("Escape")
-        session.wait()
-
-        logger.info("Message sent to %s", public_identifier)
-        return True
-
-    except (PlaywrightError, TimeoutError) as e:
-        logger.error("Failed to send message to %s → %s", public_identifier, e)
-        return False
-
-
 def _send_message(session, profile: Dict[str, Any], message: str) -> bool:
-    """Navigate to /messaging/thread/new/, search by name, compose, send."""
+    """Navigate to /messaging/thread/new/?recipient=<urn>, compose, send.
+
+    Uses the target URN (promoted to its own Lead column in crm.0005) to
+    skip the search-by-name step entirely. Post-migration 0007 the Lead
+    row no longer carries first_name/last_name, so name-based search is
+    not available anyway.
+    """
+    from linkedin.api.messaging.utils import encode_urn
+
     public_identifier = profile.get("public_identifier")
-    full_name = profile.get("full_name")
-    if not full_name:
-        logger.error("Cannot send via direct thread: no full_name for %s", public_identifier)
+    target_urn = profile.get("urn")
+    if not target_urn:
+        logger.error("Cannot send via direct thread: no URN for %s", public_identifier)
         return False
     try:
+        thread_url = f"{LINKEDIN_MESSAGING_URL}?recipient={encode_urn(target_urn)}"
         goto_page(
             session,
-            action=lambda: session.page.goto(LINKEDIN_MESSAGING_URL),
+            action=lambda: session.page.goto(thread_url),
             expected_url_pattern="/messaging",
             timeout=30_000,
-            error_message="Error opening messaging",
+            error_message="Error opening messaging thread",
         )
-
-        conn_input = _find(session.page, "connections_input").first
-        conn_input.fill("")
-        session.wait(0.5, 1)
-
-        human_type(conn_input, full_name, min_delay=10, max_delay=50)
-        session.wait(2, 3)
-
-        # Verify the first search result matches the target name exactly
-        item = _find(session.page, "search_result_row").first
-        dt = item.locator("dt").first
-        name_in_result = dt.inner_text(timeout=5_000).split("•")[0].strip()
-        if name_in_result.lower() != full_name.lower():
-            logger.error(
-                "Recipient mismatch for %s: expected '%s' but got '%s' — aborting",
-                public_identifier, full_name, name_in_result,
-            )
-            return False
-
-        item.scroll_into_view_if_needed()
-        item.click(delay=200)
         session.wait(1, 2)
 
-        human_type(_find(session.page, "compose_input").first, message, min_delay=10, max_delay=50)
-
+        human_type(
+            _find(session.page, "compose_input").first,
+            message,
+            min_delay=10,
+            max_delay=50,
+        )
         _find(session.page, "compose_send").first.click(delay=200)
         session.wait(0.5, 1)
         logger.info("Message sent to %s (direct thread)", public_identifier)
@@ -300,7 +162,7 @@ if __name__ == "__main__":
     session = cli_session(args)
     session.ensure_browser()
 
-    print(f"Searching for '{args.name}' ...")
+    logger.info("Searching for '%s' ...", args.name)
 
     goto_page(
         session,
@@ -318,11 +180,10 @@ if __name__ == "__main__":
 
     rows = _find(session.page, "search_result_row")
     count = rows.count()
-    print(f"\n=== Found {count} result rows ===\n")
+    logger.info("=== Found %d result rows ===", count)
     for i in range(min(count, 3)):
         row = rows.nth(i)
-        print(f"--- Row {i} inner_text ---")
-        print(row.inner_text(timeout=5_000))
-        print(f"\n--- Row {i} outer_html ---")
-        print(row.evaluate("el => el.outerHTML"))
-        print()
+        logger.debug("--- Row %d inner_text ---", i)
+        logger.debug(row.inner_text(timeout=5_000))
+        logger.debug("--- Row %d outer_html ---", i)
+        logger.debug(row.evaluate("el => el.outerHTML"))
